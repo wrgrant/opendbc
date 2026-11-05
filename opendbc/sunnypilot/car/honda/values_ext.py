@@ -12,8 +12,10 @@ class HondaFlagsSP(IntFlag):
   NIDEC_HYBRID = 1
   EPS_MODIFIED = 2
   HYBRID_ALT_BRAKEHOLD = 4
+  STOCK_LONGITUDINAL = 16  # same bit as mvl-boston's fork, so logs and params read the same
 
 
 class HondaSafetyFlagsSP:
   NIDEC_HYBRID = 1
   GAS_INTERCEPTOR = 2
+  STOCK_LONGITUDINAL = 4
