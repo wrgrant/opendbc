@@ -194,7 +194,8 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
       pcm_accel = int(np.clip((accel / 1.44) / max_accel, 0.0, 1.0) * self.params.NIDEC_GAS_MAX)
 
     if not self.CP.openpilotLongitudinalControl:
-      if self.frame % 2 == 0 and not (self.CP.flags & (HondaFlags.BOSCH_RADARLESS | HondaFlags.BOSCH_CANFD)):
+      # BOSCH_SUPPLEMENTAL_1 is Bosch only; a Nidec here runs sunnypilot's stock longitudinal
+      if self.frame % 2 == 0 and self.CP.flags & HondaFlags.BOSCH and not (self.CP.flags & (HondaFlags.BOSCH_RADARLESS | HondaFlags.BOSCH_CANFD)):
         can_sends.append(hondacan.create_bosch_supplemental_1(self.packer, self.CAN))
       # If using stock ACC, spam cancel command to kill gas when OP disengages.
       if pcm_cancel_cmd:
