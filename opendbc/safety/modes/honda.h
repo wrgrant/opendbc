@@ -20,12 +20,15 @@
 #define HONDA_GAS_INTERCEPTOR_ADDR_CHECK \
   {.msg = {{0x201, 0, 6, 50U, .max_counter = 15U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}}, \
 
-#define HONDA_N_COMMON_TX_MSGS \
+#define HONDA_N_LATERAL_TX_MSGS \
   {0xE4,  0, 5, .check_relay = true},   \
   {0x194, 0, 4, .check_relay = true},   \
+  {0x33D, 0, 5, .check_relay = true},   \
+
+#define HONDA_N_COMMON_TX_MSGS \
+  HONDA_N_LATERAL_TX_MSGS               \
   {0x1FA, 0, 8, .check_relay = false},  \
   {0x30C, 0, 8, .check_relay = true},   \
-  {0x33D, 0, 5, .check_relay = true},   \
 
 enum {
   HONDA_BTN_NONE = 0,
@@ -43,6 +46,7 @@ static bool honda_bosch_long = false;
 static bool honda_bosch_radarless = false;
 static bool honda_bosch_canfd = false;
 static bool honda_nidec_hybrid = false;
+static bool honda_nidec_stock_long = false;  // sunnypilot: Nidec with the stock ACC doing gas and brake
 typedef enum {HONDA_NIDEC, HONDA_BOSCH} HondaHw;
 static HondaHw honda_hw = HONDA_NIDEC;
 
@@ -330,7 +334,9 @@ static bool honda_tx_hook(const CANPacket_t *msg) {
   // FORCE CANCEL: safety check only relevant when spamming the cancel button in Bosch HW
   // ensuring that only the cancel button press is sent (VAL 2) when controls are off.
   // This avoids unintended engagements while still allowing resume spam
-  if (msg_matches(msg, 0x296U, bus_buttons) && !controls_allowed) {
+  // Nidec stock longitudinal also sends SCM_BUTTONS (0x1A6 or 0x296, by SCM layout) to cancel the stock ACC
+  const bool is_buttons_msg = msg_matches(msg, 0x296U, bus_buttons) || (honda_nidec_stock_long && msg_matches(msg, 0x1A6U, bus_buttons));
+  if (is_buttons_msg && !controls_allowed) {
     if (((msg->data[0] >> 5) & 0x7U) != 2U) {
       tx = false;
     }
@@ -359,6 +365,14 @@ static safety_config honda_nidec_init(uint16_t param) {
   // 0x1FA is brake control, 0x30C is acc hud, 0x33D is lkas hud
   static const CanMsg HONDA_N_TX_MSGS[] = {HONDA_N_COMMON_TX_MSGS};
 
+  // Stock longitudinal: steering, LKAS HUD and cancel/resume buttons only. BRAKE_COMMAND (0x1FA) and
+  // ACC_HUD (0x30C, which carries PCM gas and speed) are never sent; the stock ACC module's own are forwarded.
+  static const CanMsg HONDA_N_STOCK_LONG_TX_MSGS[] = {
+    HONDA_N_LATERAL_TX_MSGS
+    {0x1A6, 0, 8, .check_relay = false},
+    {0x296, 0, 4, .check_relay = false},
+  };
+
   static const CanMsg HONDA_N_INTERCEPTOR_TX_MSGS[] = {
     HONDA_N_COMMON_TX_MSGS
     {0x200, 0, 6, .check_relay = false},
@@ -368,6 +382,7 @@ static safety_config honda_nidec_init(uint16_t param) {
 
   const uint16_t HONDA_PARAM_SP_NIDEC_HYBRID = 1;
   const uint16_t HONDA_PARAM_GAS_INTERCEPTOR = 2;
+  const uint16_t HONDA_PARAM_SP_STOCK_LONGITUDINAL = 4;
 
   honda_hw = HONDA_NIDEC;
   honda_brake = 0;
@@ -384,6 +399,8 @@ static safety_config honda_nidec_init(uint16_t param) {
 
   honda_nidec_hybrid = GET_FLAG(current_safety_param_sp, HONDA_PARAM_SP_NIDEC_HYBRID);
   enable_gas_interceptor = GET_FLAG(current_safety_param_sp, HONDA_PARAM_GAS_INTERCEPTOR);
+  // the gas interceptor is openpilot longitudinal, so it wins if both are set
+  honda_nidec_stock_long = GET_FLAG(current_safety_param_sp, HONDA_PARAM_SP_STOCK_LONGITUDINAL) && !enable_gas_interceptor;
 
   if (enable_nidec_alt) {
     // For Nidecs with main on signal on an alternate msg (missing 0x326)
@@ -403,7 +420,11 @@ static safety_config honda_nidec_init(uint16_t param) {
     SET_RX_CHECKS(honda_nidec_common_rx_checks, ret);
   }
 
-  SET_TX_MSGS(HONDA_N_TX_MSGS, ret);
+  if (honda_nidec_stock_long) {
+    SET_TX_MSGS(HONDA_N_STOCK_LONG_TX_MSGS, ret);
+  } else {
+    SET_TX_MSGS(HONDA_N_TX_MSGS, ret);
+  }
 
   if (enable_gas_interceptor) {
     if (enable_nidec_alt) {
@@ -506,6 +527,7 @@ static safety_config honda_bosch_init(uint16_t param) {
   honda_brake_switch_prev = false;
   honda_bosch_radarless = GET_FLAG(param, HONDA_PARAM_RADARLESS);
   honda_bosch_canfd = GET_FLAG(param, HONDA_PARAM_BOSCH_CANFD);
+  honda_nidec_stock_long = false;
   // Checking for alternate brake override from safety parameter
   honda_alt_brake_msg = GET_FLAG(param, HONDA_PARAM_ALT_BRAKE);
 
@@ -554,7 +576,8 @@ static bool honda_nidec_fwd_hook(int bus_num, int addr) {
   if (bus_num == 2) {
     // forwarded if stock AEB is active
     bool is_brake_msg = addr == 0x1FA;
-    block_msg = is_brake_msg && !honda_fwd_brake;
+    // with stock longitudinal, the stock ACC module's brake command always goes through
+    block_msg = is_brake_msg && !honda_fwd_brake && !honda_nidec_stock_long;
   }
 
   return block_msg;

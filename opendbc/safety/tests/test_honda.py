@@ -419,6 +419,107 @@ class TestHondaNidecAltGasInterceptorSafety(GasInterceptorSafetyTest, HondaButto
     values = {"CRUISE_BUTTONS": buttons, "MAIN_ON": main_on, "COUNTER": self.cnt_button % 4}
     self.__class__.cnt_button += 1
     return self.packer.make_can_msg_safety("SCM_BUTTONS", bus, values)
+class TestHondaNidecStockLongSafety(HondaPcmEnableBase, TestHondaNidecSafetyBase):
+  """
+    Covers the Honda Nidec safety mode with stock longitudinal (sunnypilot): the stock ACC module does gas
+    and brake, so openpilot may only steer, draw the LKAS HUD, and cancel or resume through SCM_BUTTONS.
+  """
+  TX_MSGS = [[0xE4, 0], [0x194, 0], [0x33D, 0], [0x1A6, 0], [0x296, 0]]
+  FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x33D]}
+  RELAY_MALFUNCTION_ADDRS = {0: (0xE4, 0x194, 0x33D)}
+
+  def setUp(self):
+    super().setUp()
+    self.safety.set_current_safety_param_sp(HondaSafetyFlagsSP.STOCK_LONGITUDINAL)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, self.SAFETY_PARAM)
+    self.safety.init_tests()
+
+  # Nidec doesn't disengage on falling edge of cruise. See comment in safety_honda.h
+  def test_disable_control_allowed_from_cruise(self):
+    pass
+
+  def test_acc_hud_safety_check(self):
+    # ACC_HUD carries PCM gas and speed on Nidec: never sent, even all-zero
+    for controls_allowed in (True, False):
+      self.safety.set_controls_allowed(controls_allowed)
+      for pcm_gas in (0, 1, self.MAX_GAS, 255):
+        for pcm_speed in (0, 1, 99):
+          self.assertFalse(self._tx(self._send_acc_hud_msg(pcm_gas, pcm_speed)))
+
+  def test_brake_safety_check(self):
+    # openpilot never sends a brake command, even zero brake
+    for fwd_brake in (False, True):
+      self.safety.set_honda_fwd_brake(fwd_brake)
+      for controls_allowed in (True, False):
+        self.safety.set_controls_allowed(controls_allowed)
+        for brake in (0, 1, self.MAX_BRAKE):
+          self.assertFalse(self._tx(self._send_brake_msg(brake)))
+
+  def test_block_aeb(self):
+    for controls_allowed in (True, False):
+      self.safety.set_controls_allowed(controls_allowed)
+      for aeb_signals in ({}, {"AEB_REQ_1": 1}, {"AEB_REQ_2": 1}, {"AEB_STATUS": 1}):
+        values = {"COMPUTER_BRAKE": 0, **aeb_signals}
+        msg = self.packer.make_can_msg_safety("BRAKE_COMMAND", self.PT_BUS, values)
+        self.assertFalse(self._tx(msg), msg=aeb_signals)
+
+  def test_fwd_hook(self):
+    # the stock ACC module's BRAKE_COMMAND and ACC_HUD always reach the car, whatever the AEB latch says
+    for fwd_brake in (False, True):
+      self.safety.set_honda_fwd_brake(fwd_brake)
+      common.CarSafetyTest.test_fwd_hook(self)
+
+  def test_honda_fwd_brake_latching(self):
+    for aeb_req in (0, 1):
+      for stock_brake in (0, self.MAX_BRAKE):
+        self.assertTrue(self._rx(self._rx_brake_msg(stock_brake, aeb_req=aeb_req)))
+        self.assertEqual(0, self.safety.safety_fwd_hook(2, 0x1FA))
+        self.assertEqual(0, self.safety.safety_fwd_hook(2, 0x30C))
+
+  def test_spam_cancel_safety_check(self):
+    self.safety.set_controls_allowed(0)
+    self.assertTrue(self._tx(self._button_msg(Btn.CANCEL, bus=self.BUTTONS_BUS)))
+    self.assertFalse(self._tx(self._button_msg(Btn.RESUME, bus=self.BUTTONS_BUS)))
+    self.assertFalse(self._tx(self._button_msg(Btn.SET, bus=self.BUTTONS_BUS)))
+    self.assertFalse(self._tx(self._button_msg(Btn.MAIN, bus=self.BUTTONS_BUS)))
+    # do not block resume if we are engaged already
+    self.safety.set_controls_allowed(1)
+    self.assertTrue(self._tx(self._button_msg(Btn.RESUME, bus=self.BUTTONS_BUS)))
+    # buttons only go to the powertrain bus
+    self.assertFalse(self._tx(self._button_msg(Btn.CANCEL, bus=2)))
+
+  def test_gas_interceptor_overrides_stock_long(self):
+    # the gas interceptor is openpilot longitudinal; with both flags set the interceptor config applies
+    self.safety.set_current_safety_param_sp(HondaSafetyFlagsSP.STOCK_LONGITUDINAL | HondaSafetyFlagsSP.GAS_INTERCEPTOR)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, self.SAFETY_PARAM)
+    self.safety.init_tests()
+    self.assertTrue(self._tx(self._send_brake_msg(0)))
+    self.assertFalse(self._tx(self._button_msg(Btn.CANCEL, bus=self.BUTTONS_BUS)))
+    self.assertEqual(-1, self.safety.safety_fwd_hook(2, 0x1FA))
+
+  def test_bosch_ignores_stock_long_flag(self):
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaBosch, 0)
+    self.safety.init_tests()
+    self.assertFalse(self._tx(self._button_msg(Btn.CANCEL, bus=0)))
+
+
+class TestHondaNidecStockLongAltSafety(TestHondaNidecStockLongSafety):
+  """
+    Covers the Honda Nidec safety mode with stock longitudinal and alt SCM messages (SCM_BUTTONS is 0x1A6)
+  """
+  DBC = "acura_ilx_2016_can_generated"
+  SAFETY_PARAM = HondaSafetyFlags.NIDEC_ALT
+
+  def _acc_state_msg(self, main_on):
+    values = {"MAIN_ON": main_on}
+    return self.packer.make_can_msg_safety("SCM_BUTTONS", self.PT_BUS, values)
+
+  def _button_msg(self, buttons, main_on=False, bus=None):
+    bus = self.PT_BUS if bus is None else bus
+    values = {"CRUISE_BUTTONS": buttons, "MAIN_ON": main_on}
+    return self.packer.make_can_msg_safety("SCM_BUTTONS", bus, values)
+
+
 # ********************* Honda Bosch **********************
 class TestHondaBoschSafetyBase(HondaBase):
   DBC = "honda_civic_hatchback_ex_2017_can_generated"
