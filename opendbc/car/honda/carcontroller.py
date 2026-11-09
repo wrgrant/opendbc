@@ -153,6 +153,9 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     if self.eps_mod_lookup is not None:
       apply_torque = EpsModCarController.get_apply_torque(self, limited_torque)
 
+    if self.odyssey_eps_map is not None:
+      apply_torque = self.get_odyssey_apply_torque(limited_torque, CS.out.vEgo)
+
     # Send CAN commands
     can_sends = []
 
